@@ -1,8 +1,9 @@
 const express = require('express');
 const db = require('../db');
 const { requireAuth } = require('../auth');
-const { parseRule, ruleTimes, intervalText, isTime, isDate, addDays } = require('../lib/schedule');
+const { parseRule, ruleTimes, isTime, isDate } = require('../lib/schedule');
 const { regenerateDoses, WINDOW_MS } = require('../lib/doses');
+const { Medication, Collection } = require('../lib/medication');
 
 const router = express.Router();
 router.use(requireAuth('pasien'));
@@ -11,28 +12,7 @@ const TYPES = ['botol', 'pil', 'lain'];
 const SELECT_MED = "SELECT *, DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date FROM medications";
 
 function medJson(m) {
-  const perDay = m.times_per_day * m.qty_per_dose;
-  const endDate = addDays(m.start_date, m.duration_days - 1);
-  return {
-    id: m.id,
-    name: m.name,
-    type: m.type,
-    unit: m.unit,
-    note: m.note,
-    rule: `${m.times_per_day}x${String(m.qty_per_dose).replace('.', ',')}`,
-    times_per_day: m.times_per_day,
-    qty_per_dose: m.qty_per_dose,
-    interval: intervalText(m.times_per_day),
-    first_time: m.first_time,
-    schedule_times: m.schedule_times.split(','),
-    duration_days: m.duration_days,
-    start_date: m.start_date,
-    end_date: endDate,
-    stock: m.stock,
-    min_stock: m.min_stock,
-    low_stock: m.stock <= m.min_stock,
-    days_left: perDay ? Math.floor(m.stock / perDay) : null, // stok cukup untuk berapa hari
-  };
+  return new Medication(m).toJSON();
 }
 
 // Validasi isi formulir obat; mengembalikan { error } atau { values }
@@ -82,7 +62,8 @@ async function getMed(conn, id, patientId) {
 router.get('/', async (req, res, next) => {
   try {
     const [rows] = await db.execute(SELECT_MED + ' WHERE patient_id = ? AND active = 1 ORDER BY name', [req.user.id]);
-    res.json({ medications: rows.map(medJson) });
+    const medications = new Collection(rows.map((row) => new Medication(row))).map((medication) => medication.toJSON());
+    res.json({ medications });
   } catch (e) {
     next(e);
   }

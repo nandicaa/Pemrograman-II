@@ -3,6 +3,7 @@ const db = require('../db');
 const { requireAuth } = require('../auth');
 const { summarize } = require('../lib/doses');
 const { localToUtc, localDate, addDays } = require('../lib/schedule');
+const { Dictionary } = require('../lib/medication');
 const { medJson, SELECT_MED } = require('./medications');
 
 const DAY = 864e5;
@@ -113,8 +114,10 @@ supervisor.get('/overview', async (req, res, next) => {
       const lastReport = mine.reduce((max, d) => (d.status === 'diminum' || d.status === 'dilewati') && d.server_time > max ? d.server_time : max, null);
 
       if (missed24.length) {
+        const medicationNames = new Dictionary();
+        for (const dose of missed24) medicationNames.set(dose.medication, true);
         alerts.push({ level: 'tinggi', patient_id: p.id, patient: p.name,
-          text: `${missed24.length} dosis terlewat dalam 24 jam terakhir (${[...new Set(missed24.map((d) => d.medication))].join(', ')})` });
+          text: `${missed24.length} dosis terlewat dalam 24 jam terakhir (${medicationNames.keys().join(', ')})` });
       }
       for (const m of low) {
         alerts.push({ level: 'sedang', patient_id: p.id, patient: p.name,

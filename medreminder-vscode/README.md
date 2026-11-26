@@ -55,6 +55,7 @@ medreminder-vscode/
     ├── db.js             Koneksi MySQL
     ├── auth.js           Token JWT
     ├── lib/
+    │   ├── medication.js Model obat: inheritance, getter/setter, kontrak, collection
     │   ├── schedule.js   Aturan minum, zona waktu, daftar waktu dosis
     │   └── doses.js      Membuat ulang jadwal, menandai terlewat, ringkasan kepatuhan
     └── routes/
@@ -63,6 +64,17 @@ medreminder-vscode/
         ├── doses.js         Jadwal, riwayat, sinkronisasi konfirmasi
         └── supervisors.js   Tautan pengawas + data website pengawas
 ```
+
+## Contoh konsep OOP
+
+Backend ini memakai JavaScript, jadi beberapa konsep ditulis sebagai pola runtime/JSDoc, bukan fitur tipe bawaan:
+
+- `Medication` mewarisi `AbstractMedication`; kelas dasar menolak instansiasi langsung dan meminta subclass menyediakan `toJSON()`.
+- Getter/setter `name` dan `stock` menyediakan akses properti dengan validasi.
+- `assertImplements` memeriksa kontrak objek saat runtime sebagai simulasi interface. JavaScript tidak memiliki deklarasi `interface` bawaan.
+- `Collection` memakai `@template T` JSDoc sebagai pola generic untuk dokumentasi tipe/editor; pemeriksaan tipe JavaScript perlu diaktifkan secara terpisah. JavaScript sendiri tidak menerapkan generic saat runtime.
+- `Dictionary` memakai `Map` untuk pasangan kunci-nilai, dengan operasi `set`, `get`, `has`, dan `keys`; kelas ini digunakan untuk mengumpulkan nama obat unik pada ringkasan pengawas.
+- Variabel (`const`/`let`) digunakan di seluruh route untuk menyimpan input, hasil query, dan data respons.
 
 ## Daftar API
 
