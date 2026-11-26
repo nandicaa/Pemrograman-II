@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MedReminder</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="shared/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="in"><span class="brand"><span class="logo" aria-hidden="true"></span>MedReminder</span></div>
+</header>
+<main>
+  <section class="hero-land">
+    <h1>Minum obat tepat waktu, dengan bukti swafoto</h1>
+    <p class="muted" style="margin-top:.9rem;font-size:1.08rem;max-width:56ch">MedReminder mengingatkan setiap jadwal minum obat, meminta swafoto sebagai bukti, lalu mengirim statusnya kepada keluarga atau perawat yang memantau.</p>
+  </section>
+
+  <div class="choices">
+    <a class="choice" href="pasien/">
+      <span class="ico" id="ico-pasien"></span>
+      <h2>Saya pasien</h2>
+      <p class="muted">Catat obat dengan aturan minum seperti 3x1, dengarkan alarm, lalu konfirmasi dengan swafoto.</p>
+      <span class="go">Buka aplikasi pasien</span>
+    </a>
+    <a class="choice alt" href="pengawas/">
+      <span class="ico" id="ico-pengawas"></span>
+      <h2>Saya pengawas</h2>
+      <p class="muted">Lihat kepatuhan, stok obat, dan dosis yang terlewat dari pasien yang menautkan email kamu.</p>
+      <span class="go">Buka website pengawas</span>
+    </a>
+  </div>
+
+  <div class="section-title" style="margin-top:2.5rem"><h2>Cara memakai</h2></div>
+  <ol class="flow">
+    <li><span class="n">1</span><strong>Pengawas mendaftar</strong><p class="small muted" style="margin-top:.25rem">Di website pengawas. Email akunnya diberikan ke pasien.</p></li>
+    <li><span class="n">2</span><strong>Pasien menambah obat</strong><p class="small muted" style="margin-top:.25rem">Tulis aturan minum dan jam pertama. Jadwal alarm dibuat otomatis.</p></li>
+    <li><span class="n">3</span><strong>Pasien menautkan pengawas</strong><p class="small muted" style="margin-top:.25rem">Di menu Pengawas, masukkan email pengawas.</p></li>
+    <li><span class="n">4</span><strong>Alarm berbunyi, pasien berswafoto</strong><p class="small muted" style="margin-top:.25rem">Swafoto wajib. Tanpa foto dalam 30 menit, dosis tercatat terlewat.</p></li>
+  </ol>
+
+  <div class="section-title" style="margin-top:2.5rem"><h2>Pemeriksaan sistem</h2><button class="btn sm" id="recheck">Periksa lagi</button></div>
+  <ul class="checks" id="checks"><li class="muted">Memeriksa…</li></ul>
+</main>
+<script src="shared/common.js"></script>
+<script>
+  document.getElementById('ico-pasien').innerHTML = MR.icon('pill');
+  document.getElementById('ico-pengawas').innerHTML = MR.icon('users');
+  async function check() {
+    const box = document.getElementById('checks');
+    const item = (ok, title, text) => `<li><span class="s ${ok ? 'ok' : 'no'}">${MR.icon(ok ? 'check' : 'x')}</span><div><strong>${title}</strong>${text ? `<div class="small muted">${text}</div>` : ''}</div></li>`;
+    let server = false, db = false, dbMsg = '';
+    try {
+      const r = await fetch(MR.API_BASE + '/health');
+      server = true;
+      const j = await r.json().catch(() => ({}));
+      db = !!j.ok;
+      dbMsg = j.error || '';
+    } catch (e) {}
+    const secure = window.isSecureContext;
+    box.innerHTML =
+      item(true, 'Website (Apache XAMPP)', 'Halaman ini sudah terbuka.') +
+      item(server, 'Server MedReminder', server ? 'Berjalan di ' + MR.esc(MR.API_BASE.replace('/api', '')) : 'Buka folder medreminder-vscode di VS Code, lalu jalankan <code>npm start</code> di terminal.') +
+      item(db, 'Database MySQL', db ? 'Tabel sudah siap.' : server ? MR.esc(dbMsg) : 'Dicek setelah server berjalan.') +
+      item(secure, 'Kamera untuk swafoto', secure ? 'Bisa dipakai dari alamat ini.' : 'Kamera hanya bisa dipakai lewat http://localhost atau https. Karena swafoto wajib, pasien perlu membuka aplikasi dari salah satu alamat itu.');
+  }
+  document.getElementById('recheck').addEventListener('click', check);
+  check();
+</script>
+</body>
+</html>
