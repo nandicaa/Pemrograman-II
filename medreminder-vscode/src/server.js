@@ -20,6 +20,12 @@ app.disable('x-powered-by');
 const origins = (process.env.CORS_ORIGIN || '').split(',').map((s) => s.trim()).filter(Boolean);
 app.use(cors(origins.length ? { origin: origins } : undefined));
 app.use(express.json({ limit: '1mb' }));
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    console.log(`${req.method} ${req.originalUrl} -> ${res.statusCode}`);
+  });
+  next();
+});
 
 app.get('/', (req, res) => {
   res.type('text').send('Server MedReminder berjalan. Buka aplikasinya di http://localhost/medreminder');
