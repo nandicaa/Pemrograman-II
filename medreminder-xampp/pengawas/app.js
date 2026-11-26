@@ -89,6 +89,7 @@ async function patientView(quiet) {
   const now = Date.now();
   const doseState = (d) => (d.status === 'terjadwal' && now >= +new Date(d.scheduled_at) ? 'due' : d.status);
   const low = data.medications.filter((m) => m.low_stock).length;
+  const prevHistory = quiet && $('#history') ? $('#history').innerHTML : '<div class="section-title" style="margin-top:0"><h2>Riwayat dosis</h2></div><p class="muted">Memuat riwayat…</p>';
 
   $('#main').innerHTML = `<div class="stack-lg">
     <div><button class="btn sm ghost" data-act="back" style="margin-left:-.6rem">${icon('back')}Semua pasien</button></div>
@@ -123,7 +124,7 @@ async function patientView(quiet) {
         </div></div>`;
       }).join('')}</div>` : '<div class="card"><p class="muted">Pasien belum menambahkan obat.</p></div>'}
     </section>
-    <section id="history"><div class="section-title" style="margin-top:0"><h2>Riwayat dosis</h2></div><p class="muted">Memuat riwayat…</p></section>
+    <section id="history">${prevHistory}</section>
   </div>`;
   loadHistory();
 }

@@ -2,7 +2,7 @@ const express = require('express');
 const db = require('../db');
 const { requireAuth } = require('../auth');
 const { parseRule, ruleTimes, intervalText, isTime, isDate, addDays } = require('../lib/schedule');
-const { regenerateDoses } = require('../lib/doses');
+const { regenerateDoses, WINDOW_MS } = require('../lib/doses');
 
 const router = express.Router();
 router.use(requireAuth('pasien'));
@@ -48,7 +48,9 @@ function readForm(b) {
   if (!isTime(b.first_time)) return { error: 'Pilih jam minum pertama.' };
   if (!(days >= 1 && days <= 365)) return { error: 'Lama minum antara 1 sampai 365 hari.' };
   if (!isDate(b.start_date)) return { error: 'Pilih tanggal mulai.' };
-  if (!(stock >= 0) || !(minStock >= 0)) return { error: 'Stok harus berupa angka 0 atau lebih.' };
+  if (!(stock >= 0 && stock <= 99999) || !(minStock >= 0 && minStock <= 99999)) {
+    return { error: 'Stok harus berupa angka antara 0 sampai 99.999.' };
+  }
   return {
     values: {
       name, unit,
@@ -156,7 +158,7 @@ router.post('/:id/refill', async (req, res, next) => {
     const amount = Number(req.body.amount);
     if (!(amount > 0) || amount > 10000) return res.status(400).json({ error: 'Jumlah isi ulang harus lebih dari 0.' });
     const [r] = await db.execute(
-      'UPDATE medications SET stock = stock + ? WHERE id = ? AND patient_id = ? AND active = 1',
+      'UPDATE medications SET stock = LEAST(stock + ?, 99999) WHERE id = ? AND patient_id = ? AND active = 1',
       [amount, req.params.id, req.user.id]
     );
     if (!r.affectedRows) return res.status(404).json({ error: 'Obat tidak ditemukan.' });
@@ -176,8 +178,8 @@ router.delete('/:id', async (req, res, next) => {
     );
     if (!r.affectedRows) return res.status(404).json({ error: 'Obat tidak ditemukan.' });
     await db.execute(
-      "DELETE FROM doses WHERE medication_id = ? AND status = 'terjadwal' AND scheduled_at > UTC_TIMESTAMP()",
-      [req.params.id]
+      "DELETE FROM doses WHERE medication_id = ? AND status = 'terjadwal' AND scheduled_at > ?",
+      [req.params.id, new Date(Date.now() - WINDOW_MS)]
     );
     res.json({ ok: true });
   } catch (e) {

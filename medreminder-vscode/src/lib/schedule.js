@@ -19,7 +19,12 @@ function parseRule(value) {
 }
 
 const isTime = (v) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v || ''));
-const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !Number.isNaN(Date.parse(v + 'T00:00:00Z'));
+const isDate = (v) => {
+  const s = String(v || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(s + 'T00:00:00Z');
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+};
 
 function isTimezone(tz) {
   if (typeof tz !== 'string' || !tz || tz.length > 64) return false;

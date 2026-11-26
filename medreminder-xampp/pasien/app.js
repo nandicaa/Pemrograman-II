@@ -62,11 +62,16 @@ async function flushQueue() {
     });
     S.online = true;
     const sent = new Set();
+    const rejected = new Map();
     for (const res of r.results) {
       sent.add(res.dose_id);
       const d = S.doses.find((x) => x.id === res.dose_id);
       if (d && res.status) d.status = res.status;
       if (res.error) {
+        rejected.set(res.dose_id, res.error);
+        const photos = store.get(K('photos'), {});
+        if (photos[res.dose_id]) { delete photos[res.dose_id]; store.set(K('photos'), photos); }
+        store.set(K('hashes'), store.get(K('hashes'), []).filter((o) => o.dose_id !== res.dose_id));
         const item = q.find((x) => x.dose_id === res.dose_id);
         toast(`Konfirmasi ${item ? item.medication : 'dosis'} tidak diterima: ${res.error}`, true);
       }
@@ -75,9 +80,11 @@ async function flushQueue() {
     const before = new Map(S.meds.map((m) => [m.id, m.low_stock]));
     S.meds = (await api.call('/medications')).medications;
     for (const m of S.meds) if (m.low_stock && !before.get(m.id)) toast(`Stok ${m.name} tinggal ${fmtQ(m.stock)}. Segera isi ulang.`, true);
+    return rejected;
   } catch (e) {
     if (e.offline) S.online = false;
     else toast(e.message, true);
+    return null;
   }
 }
 
@@ -638,15 +645,20 @@ async function snap() {
   queue.save(q);
   stopCam();
   alarmDoseId = null;
+  st.textContent = 'Mengirim konfirmasi…';
+  const rejected = S.online ? await flushQueue() : null;
+  if (rejected && rejected.has(d.id)) {
+    closeModal(true);
+    render();
+    return;
+  }
   openModal(`<div class="success">
       <div class="tick">${icon('check')}</div>
       <h2>${esc(d.medication)} tercatat diminum</h2>
-      <p class="muted" style="margin-top:.4rem">${esc(doseLabel(d))}, dikonfirmasi pukul ${fmt.hm(Date.now(), tz())}.${face === 'ok' ? '' : ' Wajah tidak diverifikasi karena browser ini belum mendukung deteksi wajah.'}</p>
+      <p class="muted" style="margin-top:.4rem">${esc(doseLabel(d))}, dikonfirmasi pukul ${fmt.hm(Date.now(), tz())}.${face === 'ok' ? '' : ' Wajah tidak diverifikasi karena browser ini belum mendukung deteksi wajah.'}${S.online ? '' : ' Disimpan di antrean dan akan dikirim saat tersambung kembali.'}</p>
       <button class="btn primary lg block" style="margin-top:1.25rem" data-close>Selesai</button>
     </div>`, { type: 'success', onClose: () => { render(); setTimeout(tick, 300); } });
   render();
-  await flushQueue();
-  if (modalType() !== 'success') render();
 }
 
 /* ---------- Foto: hash duplikat dan enkripsi ---------- */
