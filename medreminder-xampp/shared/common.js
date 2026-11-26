@@ -184,4 +184,9 @@
   }
 
   window.MR = { API_BASE, MIN, DAY, pad, $, $$, esc, fmtQ, fmt, store, STATUS, TYPES, icon, medIcon, initials, ring, parseRule, ruleTimes, intervalText, toast, openModal, closeModal, modalType, client };
+
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    const swUrl = new URL('../sw.js', document.currentScript ? document.currentScript.src : location.href);
+    navigator.serviceWorker.register(swUrl.href).catch(() => {});
+  }
 })();

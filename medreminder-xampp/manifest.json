@@ -1,0 +1,19 @@
+{
+  "name": "MedReminder",
+  "short_name": "MedReminder",
+  "description": "Pengingat minum obat tepat waktu dengan bukti swafoto.",
+  "start_url": "./pasien/",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f2f8f7",
+  "theme_color": "#0d7a72",
+  "lang": "id",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

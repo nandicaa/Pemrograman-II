@@ -67,7 +67,8 @@ router.post('/sync', async (req, res, next) => {
 
   const serverNow = new Date();
   const sentAt = toDate(req.body.sent_at);
-  const skew = sentAt ? serverNow - sentAt : 0;
+  if (!sentAt) return res.status(400).json({ error: 'Waktu pengiriman perangkat (sent_at) tidak valid.' });
+  const skew = serverNow - sentAt;
   const warning = Math.abs(skew) > MAX_SKEW_MS
     ? `Jam perangkat ${skew > 0 ? 'terlambat' : 'lebih cepat'} ${Math.round(Math.abs(skew) / MIN)} menit dari jam server`
     : null;
@@ -78,9 +79,17 @@ router.post('/sync', async (req, res, next) => {
     await conn.beginTransaction();
     const results = [];
     for (const u of updates) {
+      if (!u || typeof u !== 'object') {
+        results.push({ dose_id: null, error: 'Format pembaruan dosis tidak valid.' });
+        continue;
+      }
       const id = Number(u.dose_id);
-      const result = { dose_id: id };
+      const result = { dose_id: Number.isInteger(id) && id > 0 ? id : u.dose_id ?? null };
       results.push(result);
+      if (!Number.isInteger(id) || id <= 0) {
+        result.error = 'ID dosis tidak valid.';
+        continue;
+      }
       const deviceTime = toDate(u.device_time);
       if (u.status !== 'diminum') {
         result.error = 'Dosis hanya bisa dikonfirmasi dengan swafoto.';
@@ -88,6 +97,10 @@ router.post('/sync', async (req, res, next) => {
       }
       if (!deviceTime || !String(u.pose || '').trim()) {
         result.error = 'Konfirmasi harus disertai swafoto dengan tantangan pose.';
+        continue;
+      }
+      if (deviceTime.getTime() > sentAt.getTime() + MIN) {
+        result.error = 'Waktu konfirmasi perangkat tidak valid.';
         continue;
       }
       const [rows] = await conn.execute(

@@ -193,7 +193,12 @@ supervisor.get('/patients/:id/doses', async (req, res, next) => {
     const params = [p.id, new Date(Date.now() - days * DAY)];
     if (['diminum', 'terlewat'].includes(req.query.status)) { where.push('d.status = ?'); params.push(req.query.status); }
     if (req.query.warning === '1') where.push('d.warning IS NOT NULL');
-    if (req.query.medication_id) { where.push('d.medication_id = ?'); params.push(Number(req.query.medication_id)); }
+    if (req.query.medication_id) {
+      const medId = Number(req.query.medication_id);
+      if (!Number.isInteger(medId) || medId <= 0) return res.status(400).json({ error: 'ID obat tidak valid.' });
+      where.push('d.medication_id = ?');
+      params.push(medId);
+    }
 
     const [rows] = await db.execute(
       `SELECT d.id, d.medication_id, d.scheduled_at, d.status, d.device_time, d.server_time, d.warning, d.pose, d.face_check,
@@ -209,6 +214,20 @@ supervisor.get('/patients/:id/doses', async (req, res, next) => {
       [p.id]
     );
     res.json({ patient: p, doses: rows, medications: medOptions });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// DELETE /api/supervisor/patients/:id  -> pengawas berhenti memantau pasien ini
+supervisor.delete('/patients/:id', async (req, res, next) => {
+  try {
+    const [r] = await db.execute(
+      'DELETE FROM supervisor_links WHERE supervisor_id = ? AND patient_id = ?',
+      [req.user.id, req.params.id]
+    );
+    if (!r.affectedRows) return res.status(404).json({ error: 'Pasien tidak ditemukan atau sudah dilepas.' });
+    res.json({ ok: true });
   } catch (e) {
     next(e);
   }

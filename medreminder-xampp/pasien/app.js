@@ -9,7 +9,7 @@ const REPEAT = 5 * MIN;    // alarm diulang tiap 5 menit
 const POSES = ['Acungkan jempol', 'Angkat dua jari di samping wajah', 'Tutup satu mata', 'Miringkan kepala ke kiri',
   'Miringkan kepala ke kanan', 'Sentuh pipi dengan tangan yang bebas', 'Tersenyum lebar', 'Letakkan tangan bebas di dagu'];
 
-const S = { user: null, meds: [], doses: [], links: [], history: null, online: true, tab: 'hari', authMode: 'login' };
+const S = { user: null, meds: [], doses: [], links: [], history: null, historyDays: 30, photoIds: new Set(), online: true, tab: 'hari', authMode: 'login' };
 
 /* ---------- Penyimpanan lokal per akun ---------- */
 const K = (name) => `mr_${name}_${S.user.id}`;
@@ -18,6 +18,122 @@ const setup = { get: () => store.get(K('setup'), {}), set: (patch) => store.set(
 const tz = () => (S.user && S.user.timezone) || undefined;
 const todayYmd = () => fmt.ymd(Date.now(), tz());
 const firstName = () => String(S.user.name).trim().split(/\s+/)[0];
+
+/* ---------- Penyimpanan foto di IndexedDB (fallback ke localStorage) ---------- */
+const photoStore = (() => {
+  let dbPromise = null;
+  function openDB() {
+    if (!('indexedDB' in window)) return Promise.resolve(null);
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((resolve) => {
+      try {
+        const req = indexedDB.open('medreminder_photos', 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('photos')) {
+            const os = db.createObjectStore('photos', { keyPath: 'k' });
+            os.createIndex('userId', 'userId', { unique: false });
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      } catch (e) { resolve(null); }
+    });
+    return dbPromise;
+  }
+  const key = (uid, id) => `${uid}:${id}`;
+  async function loadIds(uid) {
+    S.photoIds = new Set();
+    const legacy = store.get(`mr_photos_${uid}`, {});
+    const db = await openDB();
+    if (!db) {
+      for (const id of Object.keys(legacy)) S.photoIds.add(Number(id));
+      return;
+    }
+    // Migrasi foto lama dari localStorage ke IndexedDB agar localStorage tidak penuh
+    const legacyEntries = Object.entries(legacy);
+    if (legacyEntries.length) {
+      await new Promise((resolve) => {
+        const tx = db.transaction('photos', 'readwrite');
+        const os = tx.objectStore('photos');
+        for (const [id, val] of legacyEntries) os.put({ k: key(uid, id), userId: uid, doseId: Number(id), val });
+        tx.oncomplete = () => { store.del(`mr_photos_${uid}`); resolve(); };
+        tx.onerror = () => resolve();
+      });
+    }
+    await new Promise((resolve) => {
+      const tx = db.transaction('photos', 'readonly');
+      const idx = tx.objectStore('photos').index('userId');
+      const req = idx.getAllKeys(IDBKeyRange.only(uid));
+      req.onsuccess = () => {
+        for (const k of req.result || []) {
+          const id = Number(String(k).split(':')[1]);
+          if (Number.isFinite(id)) S.photoIds.add(id);
+        }
+        resolve();
+      };
+      req.onerror = () => resolve();
+    });
+  }
+  async function get(uid, id) {
+    const db = await openDB();
+    if (db) {
+      const rec = await new Promise((resolve) => {
+        const req = db.transaction('photos', 'readonly').objectStore('photos').get(key(uid, id));
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      });
+      if (rec) return rec.val;
+    }
+    return store.get(`mr_photos_${uid}`, {})[id] || null;
+  }
+  async function set(uid, id, val) {
+    const db = await openDB();
+    if (db) {
+      const ok = await new Promise((resolve) => {
+        const tx = db.transaction('photos', 'readwrite');
+        tx.objectStore('photos').put({ k: key(uid, id), userId: uid, doseId: Number(id), val });
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      });
+      if (ok) { S.photoIds.add(Number(id)); return true; }
+      return false;
+    }
+    const legacy = store.get(`mr_photos_${uid}`, {});
+    legacy[id] = val;
+    const ok = store.set(`mr_photos_${uid}`, legacy);
+    if (ok) S.photoIds.add(Number(id));
+    return ok;
+  }
+  async function del(uid, id) {
+    S.photoIds.delete(Number(id));
+    const legacy = store.get(`mr_photos_${uid}`, {});
+    if (legacy[id]) { delete legacy[id]; store.set(`mr_photos_${uid}`, legacy); }
+    const db = await openDB();
+    if (!db) return;
+    await new Promise((resolve) => {
+      const tx = db.transaction('photos', 'readwrite');
+      tx.objectStore('photos').delete(key(uid, id));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  }
+  async function clearUser(uid) {
+    S.photoIds.clear();
+    store.del(`mr_photos_${uid}`);
+    const db = await openDB();
+    if (!db) return;
+    await new Promise((resolve) => {
+      const tx = db.transaction('photos', 'readwrite');
+      const os = tx.objectStore('photos');
+      const req = os.index('userId').getAllKeys(IDBKeyRange.only(uid));
+      req.onsuccess = () => { for (const k of req.result || []) os.delete(k); };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  }
+  return { loadIds, get, set, del, clearUser, has: (id) => S.photoIds.has(Number(id)), count: () => S.photoIds.size };
+})();
 
 /* ---------- Status dosis ---------- */
 const queued = (id) => queue.all().find((q) => q.dose_id === id);
@@ -69,13 +185,13 @@ async function flushQueue() {
       if (d && res.status) d.status = res.status;
       if (res.error) {
         rejected.set(res.dose_id, res.error);
-        const photos = store.get(K('photos'), {});
-        if (photos[res.dose_id]) { delete photos[res.dose_id]; store.set(K('photos'), photos); }
+        await photoStore.del(S.user.id, res.dose_id);
         store.set(K('hashes'), store.get(K('hashes'), []).filter((o) => o.dose_id !== res.dose_id));
         const item = q.find((x) => x.dose_id === res.dose_id);
         toast(`Konfirmasi ${item ? item.medication : 'dosis'} tidak diterima: ${res.error}`, true);
       }
     }
+    if (sent.size) S.history = null;
     queue.save(queue.all().filter((x) => !sent.has(x.dose_id)));
     const before = new Map(S.meds.map((m) => [m.id, m.low_stock]));
     S.meds = (await api.call('/medications')).medications;
@@ -159,6 +275,7 @@ async function submitAuth(form) {
     api.setToken(r.token);
     S.user = r.user; S.tab = 'hari';
     store.set('mr_last_user_pasien', S.user);
+    await photoStore.loadIds(S.user.id);
     await loadAll();
     await flushQueue();
     render();
@@ -207,7 +324,7 @@ function nowCard() {
   }
   const next = S.doses.filter((d) => d.status === 'terjadwal' && +new Date(d.scheduled_at) > now).sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at))[0];
   if (next) {
-    const same = S.doses.filter((d) => d.scheduled_at === next.scheduled_at);
+    const same = S.doses.filter((d) => d.scheduled_at === next.scheduled_at && d.status === 'terjadwal' && !queued(d.id));
     const isToday = fmt.ymd(next.scheduled_at, tz()) === todayYmd();
     return `<section class="now">
       <span class="label">${icon('clock')}Berikutnya</span>
@@ -222,10 +339,10 @@ function nowCard() {
 
 function doseItem(d) {
   const st = shownStatus(d);
-  const photo = store.get(K('photos'), {})[d.id];
+  const hasPhoto = photoStore.has(d.id);
   let acts = '';
   if (st === 'due') acts = `<button class="btn sm primary" data-act="confirm" data-id="${d.id}">${icon('camera')}Foto</button>`;
-  else if (photo) acts = `<button class="icon-btn" data-act="photo" data-id="${d.id}" aria-label="Lihat foto bukti">${icon('image')}</button>`;
+  else if (hasPhoto) acts = `<button class="icon-btn" data-act="photo" data-id="${d.id}" aria-label="Lihat foto bukti">${icon('image')}</button>`;
   const when = d.status === 'diminum' && d.device_time ? `<span>pukul ${fmt.hm(d.device_time, tz())}</span>` : '';
   return `<li class="item ${['diminum', 'terlewat', 'dilewati'].includes(st) ? 'done' : ''}">
     <div class="when">${fmt.hm(d.scheduled_at, tz())}</div>
@@ -250,7 +367,7 @@ function todayView() {
     <div><h1>Halo, ${esc(firstName())}</h1><p class="muted">${esc(fmt.day(Date.now(), tz()))}</p></div>
     ${checklistHTML()}
     ${nowCard()}
-    ${low.map((m) => `<div class="banner sun"><div class="msg">${icon('box')}<span><strong>Stok ${esc(m.name)} ${m.stock <= 0 ? 'habis' : 'tinggal ' + fmtQ(m.stock)}.</strong> ${m.stock > 0 ? `Cukup sekitar ${m.days_left} hari lagi.` : 'Isi ulang agar bisa diminum.'}</span></div><button class="btn sm" data-act="refill" data-id="${m.id}">Isi ulang</button></div>`).join('')}
+    ${low.map((m) => `<div class="banner sun"><div class="msg">${icon('box')}<span><strong>Stok ${esc(m.name)} ${m.stock <= 0 ? 'habis' : 'tinggal ' + fmtQ(m.stock)}.</strong> ${m.stock > 0 ? (m.days_left > 0 ? `Cukup sekitar ${m.days_left} hari lagi.` : 'Cukup kurang dari 1 hari lagi.') : 'Isi ulang agar bisa diminum.'}</span></div><button class="btn sm" data-act="refill" data-id="${m.id}">Isi ulang</button></div>`).join('')}
     <section class="card">
       <div class="spread"><h3>Jadwal hari ini</h3><span class="small muted">${taken} dari ${today.length} diminum</span></div>
       ${today.length ? `<div class="progress" style="margin:.75rem 0 .5rem"><div class="track">
@@ -294,13 +411,22 @@ function medsView() {
     }).join('')}</section></div>`;
 }
 
-function rulePreview(rule, first) {
+function rulePreview(rule, first, startDate, durationDays) {
   const r = parseRule(rule);
   if (!r) return `<span class="bad">Tulis aturan seperti 3x1: 3 kali sehari, 1 tiap minum. Maksimal 6 kali sehari.</span>`;
   if (!/^\d{2}:\d{2}$/.test(first || '')) return 'Pilih jam minum pertama.';
+  let pastNote = '';
+  const days = Number(durationDays);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(startDate || '') && Number.isInteger(days) && days >= 1) {
+    const end = new Date(startDate + 'T00:00:00Z');
+    end.setUTCDate(end.getUTCDate() + days - 1);
+    if (!Number.isNaN(end.getTime()) && end.toISOString().slice(0, 10) < todayYmd()) {
+      pastNote = `<div class="bad" style="margin-top:.35rem">Periode obat berakhir di masa lalu, sehingga tidak ada jadwal baru yang dibuat.</div>`;
+    }
+  }
   return `<div class="row" style="gap:.4rem;margin-bottom:.35rem;color:var(--text)">${icon('bell')}<strong>Alarm ${r.n}x sehari, tiap ${intervalText(r.n)}</strong></div>
     <div class="times">${ruleTimes(r.n, first).map((x) => `<span class="chip antre">${x.replace(':', '.')}</span>`).join('')}</div>
-    <div>Stok berkurang ${fmtQ(r.q)} setiap kali minum.</div>`;
+    <div>Stok berkurang ${fmtQ(r.q)} setiap kali minum.</div>${pastNote}`;
 }
 
 function medForm(med) {
@@ -317,14 +443,14 @@ function medForm(med) {
       <div><label for="m-rule">Aturan minum</label><input id="m-rule" name="rule" value="${esc(m.rule)}" placeholder="3x1" autocomplete="off" inputmode="text"><span class="hint">Kali sehari × jumlah tiap minum. Contoh 3x1 atau 2x½.</span></div>
       <div><label for="m-first">Minum pertama pukul</label><input id="m-first" name="first_time" type="time" value="${esc(m.first_time)}"></div>
     </div>
-    <div class="note" id="rule-preview" aria-live="polite">${rulePreview(m.rule, m.first_time)}</div>
+    <div class="note" id="rule-preview" aria-live="polite">${rulePreview(m.rule, m.first_time, m.start_date, m.duration_days)}</div>
     <div class="grid2">
       <div><label for="m-start">Mulai tanggal</label><input id="m-start" name="start_date" type="date" value="${esc(m.start_date)}"></div>
       <div><label for="m-days">Lama minum (hari)</label><input id="m-days" name="duration_days" type="number" min="1" max="365" value="${esc(m.duration_days)}"></div>
     </div>
     <div class="grid2">
-      <div><label for="m-stock">Stok sekarang</label><input id="m-stock" name="stock" type="number" min="0" step="0.5" value="${esc(m.stock)}"></div>
-      <div><label for="m-min">Ingatkan saat stok tinggal</label><input id="m-min" name="min_stock" type="number" min="0" step="0.5" value="${esc(m.min_stock)}"></div>
+      <div><label for="m-stock">Stok sekarang</label><input id="m-stock" name="stock" type="number" min="0" step="any" value="${esc(m.stock)}"></div>
+      <div><label for="m-min">Ingatkan saat stok tinggal</label><input id="m-min" name="min_stock" type="number" min="0" step="any" value="${esc(m.min_stock)}"></div>
     </div>
     <div><label for="m-note">Catatan <span class="muted" style="font-weight:400">(opsional)</span></label><input id="m-note" name="note" value="${esc(m.note || '')}" placeholder="Contoh: sesudah makan"></div>
     ${med ? '<p class="note">Kalau aturan, jam, atau tanggal diubah, jadwal mendatang dibuat ulang. Riwayat yang sudah lewat tidak berubah.</p>' : ''}
@@ -332,7 +458,11 @@ function medForm(med) {
     <button class="btn primary lg block" type="submit">${med ? 'Simpan perubahan' : 'Simpan obat'}</button>
   </form>`, { type: 'form' });
   const f = $('#med-form', el);
-  f.addEventListener('input', (e) => { if (['rule', 'first_time'].includes(e.target.name)) $('#rule-preview', el).innerHTML = rulePreview(f.rule.value, f.first_time.value); });
+  f.addEventListener('input', (e) => {
+    if (['rule', 'first_time', 'start_date', 'duration_days'].includes(e.target.name)) {
+      $('#rule-preview', el).innerHTML = rulePreview(f.rule.value, f.first_time.value, f.start_date.value, f.duration_days.value);
+    }
+  });
   f.addEventListener('submit', async (e) => {
     e.preventDefault();
     const body = Object.fromEntries(new FormData(f).entries());
@@ -368,13 +498,18 @@ function refillForm(med) {
   f.addEventListener('input', prev);
   f.addEventListener('submit', async (e) => {
     e.preventDefault();
+    const btn = f.querySelector('button[type=submit]');
+    btn.disabled = true; $('#r-err', el).textContent = '';
     try {
       const r = await api.call(`/medications/${med.id}/refill`, { method: 'POST', body: { amount: Number(f.amount.value) } });
       closeModal(true);
       S.meds = S.meds.map((m) => (m.id === med.id ? r.medication : m));
       render();
       toast(`Stok ${med.name} sekarang ${fmtQ(r.medication.stock)}`);
-    } catch (err) { $('#r-err', el).textContent = err.message; }
+    } catch (err) {
+      $('#r-err', el).textContent = err.message;
+      btn.disabled = false;
+    }
   });
 }
 
@@ -389,8 +524,12 @@ function confirmBox(title, text, okLabel, danger) {
 
 /* ---------- Riwayat ---------- */
 async function loadHistory() {
-  try { S.history = await api.call('/doses/history?days=30'); }
-  catch (e) { S.history = { error: e.offline ? 'Riwayat butuh koneksi ke server.' : e.message }; }
+  const days = S.historyDays;
+  let data;
+  try { data = await api.call(`/doses/history?days=${days}`); }
+  catch (e) { data = { error: e.offline ? 'Riwayat butuh koneksi ke server.' : e.message }; }
+  if (S.historyDays !== days) return;
+  S.history = data;
   if (S.tab === 'riwayat' && !modalType()) render();
 }
 
@@ -405,11 +544,14 @@ function historyView() {
     const ok = list.filter((d) => d.status === 'diminum').length;
     days.push({ ymd, pct: list.length ? Math.round((ok / list.length) * 100) : null, label: Number(ymd.slice(8)) });
   }
-  const photos = store.get(K('photos'), {});
-  const nPhotos = Object.keys(photos).length;
+  const nPhotos = photoStore.count();
   return `<div class="stack">
-    <h1>Riwayat</h1>
-    <section class="card"><h3>Kepatuhan 30 hari</h3>
+    <div class="spread"><h1>Riwayat</h1>
+      <select id="history-days" aria-label="Periode riwayat" style="width:auto;min-height:40px;padding:.4rem 2rem .4rem .75rem">
+        ${[[7, '7 hari'], [30, '30 hari'], [90, '90 hari']].map(([v, l]) => `<option value="${v}" ${S.historyDays === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+    </div>
+    <section class="card"><h3>Kepatuhan ${S.historyDays} hari</h3>
       <div class="stats" style="margin-top:1rem">${ringChart(summary.adherence, 120, 12)}
         <div class="counts">
           <div class="count"><strong style="color:var(--ok)">${summary.taken}</strong><span>Diminum</span></div>
@@ -424,7 +566,7 @@ function historyView() {
       ${doses.length ? `<ul class="list" style="margin-top:.5rem">${doses.slice(0, 30).map((d) => `<li class="item">
         <div class="when">${fmt.hm(d.scheduled_at, tz())}</div>
         <div><div class="name">${esc(d.medication)}</div><div class="meta"><span>${esc(fmt.date(d.scheduled_at, tz()))}</span>${chip(d.status)}</div></div>
-        <div class="acts">${photos[d.id] ? `<button class="icon-btn" data-act="photo" data-id="${d.id}" aria-label="Lihat foto bukti">${icon('image')}</button>` : ''}</div></li>`).join('')}</ul>`
+        <div class="acts">${photoStore.has(d.id) ? `<button class="icon-btn" data-act="photo" data-id="${d.id}" aria-label="Lihat foto bukti">${icon('image')}</button>` : ''}</div></li>`).join('')}</ul>`
         : '<p class="muted" style="margin-top:.5rem">Belum ada dosis yang selesai.</p>'}
     </section>
     <div class="grid2">
@@ -633,20 +775,20 @@ async function snap() {
   if (hashes.some((o) => hamming(o.h, hash) <= 3)) return fail('Foto ini sama dengan foto sebelumnya. Ambil foto baru.');
 
   const d = cam.dose;
-  const photos = store.get(K('photos'), {});
-  photos[d.id] = await encrypt(c.toDataURL('image/jpeg', 0.72));
-  if (!store.set(K('photos'), photos)) return fail('Penyimpanan foto penuh. Hapus foto lama di menu Riwayat.');
+  const encPhoto = await encrypt(c.toDataURL('image/jpeg', 0.72));
+  if (!(await photoStore.set(S.user.id, d.id, encPhoto))) return fail('Penyimpanan foto penuh. Hapus foto lama di menu Riwayat.');
   hashes.push({ h: hash, dose_id: d.id });
-  store.set(K('hashes'), hashes);
+  store.set(K('hashes'), hashes.slice(-200));
   setup.set({ camera: true });
 
   const q = queue.all().filter((it) => it.dose_id !== d.id);
   q.push({ dose_id: d.id, status: 'diminum', device_time: new Date().toISOString(), medication: d.medication, pose: cam.pose, face_check: face });
   queue.save(q);
+  S.history = null;
   stopCam();
   alarmDoseId = null;
   st.textContent = 'Mengirim konfirmasi…';
-  const rejected = S.online ? await flushQueue() : null;
+  const rejected = navigator.onLine !== false ? await flushQueue() : null;
   if (rejected && rejected.has(d.id)) {
     closeModal(true);
     render();
@@ -690,7 +832,7 @@ async function decrypt(o) {
   return new TextDecoder().decode(p);
 }
 async function viewPhoto(id) {
-  const enc = store.get(K('photos'), {})[id];
+  const enc = await photoStore.get(S.user.id, id);
   if (!enc) { toast('Foto bukti sudah dihapus.'); return; }
   const d = S.doses.find((x) => x.id === id) || (S.history && S.history.doses.find((x) => x.id === id));
   try {
@@ -736,7 +878,7 @@ document.addEventListener('click', async (e) => {
     case 'csv': exportCSV(); break;
     case 'del-photos':
       if (!(await confirmBox('Hapus semua foto bukti?', 'Foto di perangkat ini dihapus permanen. Status dosis di server tidak berubah.', 'Hapus foto', true))) return;
-      store.del(K('photos')); store.del(K('hashes')); render(); toast('Semua foto bukti dihapus');
+      await photoStore.clearUser(S.user.id); store.del(K('hashes')); render(); toast('Semua foto bukti dihapus');
       break;
     case 'unlink':
       if (!(await confirmBox(`Lepas ${el.dataset.name}?`, 'Pengawas ini tidak bisa lagi melihat data dosismu.', 'Lepas', true))) return;
@@ -745,9 +887,17 @@ document.addEventListener('click', async (e) => {
     case 'logout': {
       const n = queue.all().length;
       if (n && !(await confirmBox('Keluar sekarang?', `${n} konfirmasi belum terkirim. Konfirmasi itu tetap tersimpan di perangkat ini dan dikirim saat kamu masuk lagi.`, 'Keluar'))) return;
-      api.setToken(null); S.user = null; S.authMode = 'login'; render();
+      api.setToken(null); S.user = null; S.photoIds.clear(); S.history = null; S.authMode = 'login'; render();
       break;
     }
+  }
+});
+
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'history-days') {
+    S.historyDays = Number(e.target.value) || 30;
+    S.history = null;
+    render();
   }
 });
 
@@ -757,12 +907,19 @@ document.addEventListener('submit', async (e) => {
   if (f.id === 'link-form') {
     e.preventDefault();
     const err = $('#link-err');
+    const btn = f.querySelector('button[type=submit]');
+    const email = f.email.value.trim();
+    if (!email) { err.textContent = 'Masukkan email pengawas.'; return; }
+    btn.disabled = true; err.textContent = '';
     try {
-      const r = await api.call('/links', { method: 'POST', body: { email: f.email.value } });
+      const r = await api.call('/links', { method: 'POST', body: { email } });
       S.links.push(r.supervisor);
       render();
       toast(`${r.supervisor.name} sekarang bisa memantau dosismu`);
-    } catch (x) { err.textContent = x.message; }
+    } catch (x) {
+      err.textContent = x.message;
+      btn.disabled = false;
+    }
   }
 });
 
@@ -779,7 +936,7 @@ async function boot() {
     } catch (e) {
       if (e.offline) S.user = store.get('mr_last_user_pasien', null);
     }
-    if (S.user) { await loadAll().catch((e) => toast(e.message, true)); await flushQueue(); }
+    if (S.user) { await photoStore.loadIds(S.user.id); await loadAll().catch((e) => toast(e.message, true)); await flushQueue(); }
   }
   render();
   setInterval(tick, 10e3);

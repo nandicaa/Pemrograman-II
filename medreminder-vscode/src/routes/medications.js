@@ -35,18 +35,20 @@ function medJson(m) {
   };
 }
 
+const hasNum = (v) => v !== undefined && v !== null && String(v).trim() !== '' && Number.isFinite(Number(v));
+
 // Validasi isi formulir obat; mengembalikan { error } atau { values }
 function readForm(b) {
   const name = String(b.name || '').trim().slice(0, 120);
   const unit = String(b.unit || '').trim().slice(0, 80);
   const rule = parseRule(b.rule);
-  const days = parseInt(b.duration_days, 10);
-  const stock = Number(b.stock);
-  const minStock = Number(b.min_stock);
+  const days = hasNum(b.duration_days) ? Number(b.duration_days) : NaN;
+  const stock = hasNum(b.stock) ? Number(b.stock) : NaN;
+  const minStock = hasNum(b.min_stock) ? Number(b.min_stock) : NaN;
   if (!name || !unit) return { error: 'Isi nama obat dan satuannya.' };
   if (!rule) return { error: 'Aturan minum belum benar. Tulis seperti 3x1 (maksimal 6 kali sehari).' };
   if (!isTime(b.first_time)) return { error: 'Pilih jam minum pertama.' };
-  if (!(days >= 1 && days <= 365)) return { error: 'Lama minum antara 1 sampai 365 hari.' };
+  if (!Number.isInteger(days) || days < 1 || days > 365) return { error: 'Lama minum antara 1 sampai 365 hari.' };
   if (!isDate(b.start_date)) return { error: 'Pilih tanggal mulai.' };
   if (!(stock >= 0 && stock <= 99999) || !(minStock >= 0 && minStock <= 99999)) {
     return { error: 'Stok harus berupa angka antara 0 sampai 99.999.' };
@@ -171,19 +173,29 @@ router.post('/:id/refill', async (req, res, next) => {
 
 // DELETE /api/medications/:id  -> obat dinonaktifkan, jadwal mendatang dihapus, riwayat tetap ada
 router.delete('/:id', async (req, res, next) => {
+  let conn;
   try {
-    const [r] = await db.execute(
+    conn = await db.getConnection();
+    await conn.beginTransaction();
+    const [r] = await conn.execute(
       'UPDATE medications SET active = 0 WHERE id = ? AND patient_id = ? AND active = 1',
       [req.params.id, req.user.id]
     );
-    if (!r.affectedRows) return res.status(404).json({ error: 'Obat tidak ditemukan.' });
-    await db.execute(
+    if (!r.affectedRows) {
+      await conn.rollback();
+      return res.status(404).json({ error: 'Obat tidak ditemukan.' });
+    }
+    await conn.execute(
       "DELETE FROM doses WHERE medication_id = ? AND status = 'terjadwal' AND scheduled_at > ?",
       [req.params.id, new Date(Date.now() - WINDOW_MS)]
     );
+    await conn.commit();
     res.json({ ok: true });
   } catch (e) {
+    if (conn) await conn.rollback().catch(() => {});
     next(e);
+  } finally {
+    if (conn) conn.release();
   }
 });
 

@@ -1,8 +1,9 @@
 // Website pengawas MedReminder.
-const { $, esc, fmt, fmtQ, STATUS, icon, medIcon, ring, initials, toast } = MR;
+const { $, esc, fmt, fmtQ, STATUS, icon, medIcon, ring, initials, toast, openModal, closeModal } = MR;
 const api = MR.client('pengawas');
 
 const S = { user: null, authMode: 'login', patientId: null, filters: { days: 30, status: '', medication_id: '', warning: '' } };
+let historyReqSeq = 0;
 const CHIP_ICON = { due: 'bell', diminum: 'check', terlewat: 'x', terjadwal: 'clock', dilewati: 'x' };
 const chip = (st, label) => `<span class="chip ${st}">${icon(CHIP_ICON[st])}${label || STATUS[st]}</span>`;
 
@@ -92,7 +93,10 @@ async function patientView(quiet) {
   const prevHistory = quiet && $('#history') ? $('#history').innerHTML : '<div class="section-title" style="margin-top:0"><h2>Riwayat dosis</h2></div><p class="muted">Memuat riwayat…</p>';
 
   $('#main').innerHTML = `<div class="stack-lg">
-    <div><button class="btn sm ghost" data-act="back" style="margin-left:-.6rem">${icon('back')}Semua pasien</button></div>
+    <div class="spread">
+      <button class="btn sm ghost" data-act="back" style="margin-left:-.6rem">${icon('back')}Semua pasien</button>
+      <button class="btn sm danger" data-act="unlink-patient" data-id="${p.id}" data-name="${esc(p.name)}">${icon('trash')}Lepas pasien</button>
+    </div>
     <div class="page-head"><div class="avatar">${esc(initials(p.name))}</div><div><h1>${esc(p.name)}</h1><p class="small muted">${esc(p.email)} · jam menurut zona waktu pasien (${esc(tz)})</p></div></div>
     <div class="kpis">
       <div class="kpi"><div class="v">${data.week.adherence === null ? '–' : data.week.adherence + '%'}</div><div class="l">Kepatuhan 7 hari (${data.week.taken} dari ${data.week.total})</div></div>
@@ -102,7 +106,7 @@ async function patientView(quiet) {
     </div>
     <div class="cols">
       <section class="card"><h3>Jadwal hari ini</h3>
-        ${data.today.length ? `<ul class="list" style="margin-top:.5rem">${data.today.map((d) => { const st = doseState(d); return `<li class="item ${['diminum', 'terlewat'].includes(st) ? 'done' : ''}">
+        ${data.today.length ? `<ul class="list" style="margin-top:.5rem">${data.today.map((d) => { const st = doseState(d); return `<li class="item ${['diminum', 'terlewat', 'dilewati'].includes(st) ? 'done' : ''}">
           <div class="when">${fmt.hm(d.scheduled_at, tz)}</div>
           <div><div class="name">${esc(d.medication)}</div><div class="meta"><span>${fmtQ(d.qty_per_dose)} ${esc(d.unit)}</span>${chip(st, st === 'due' ? 'Sedang jatuh tempo' : null)}${d.status === 'diminum' && d.device_time ? `<span>pukul ${fmt.hm(d.device_time, tz)}</span>` : ''}</div></div>
           <div></div></li>`; }).join('')}</ul>` : '<p class="muted" style="margin-top:.5rem">Tidak ada jadwal hari ini.</p>'}
@@ -115,12 +119,15 @@ async function patientView(quiet) {
     <section><div class="section-title" style="margin-top:0"><h2>Obat</h2><span class="small muted">${data.medications.length} aktif</span></div>
       ${data.medications.length ? `<div class="card">${data.medications.map((m) => {
         const full = Math.max(m.qty_per_dose * m.times_per_day * m.duration_days, m.stock, 1);
+        const stockText = m.stock <= 0
+          ? 'Stok habis'
+          : `Stok ${fmtQ(m.stock)} ${esc(m.unit.split(' ')[0])}${m.days_left !== null ? (m.days_left > 0 ? `, cukup sekitar ${m.days_left} hari` : ', cukup kurang dari 1 hari') : ''}`;
         return `<div class="med"><div class="med-ico ${m.type}">${medIcon(m.type)}</div><div>
           <div class="spread" style="align-items:flex-start"><div><h3>${esc(m.name)}</h3><p class="small muted">${fmtQ(m.qty_per_dose)} ${esc(m.unit)} · ${m.times_per_day}x sehari, tiap ${esc(m.interval)}${m.note ? ' · ' + esc(m.note) : ''}</p></div>
             ${m.low_stock ? `<span class="chip due">${icon('box')}Stok menipis</span>` : ''}</div>
           <div class="times">${m.schedule_times.map((x) => `<span class="chip terjadwal">${icon('clock')}${x.replace(':', '.')}</span>`).join('')}</div>
           <div class="meter ${m.stock <= 0 ? 'empty' : m.low_stock ? 'low' : ''}"><span style="width:${Math.min(100, Math.round((m.stock / full) * 100))}%"></span></div>
-          <p class="small muted">Stok ${fmtQ(m.stock)}, cukup sekitar ${m.days_left} hari · ${fmt.date(m.start_date + 'T12:00:00')} sampai ${fmt.date(m.end_date + 'T12:00:00')}</p>
+          <p class="small ${m.low_stock ? 'bad' : 'muted'}">${stockText} · ${fmt.date(m.start_date + 'T12:00:00')} sampai ${fmt.date(m.end_date + 'T12:00:00')}</p>
         </div></div>`;
       }).join('')}</div>` : '<div class="card"><p class="muted">Pasien belum menambahkan obat.</p></div>'}
     </section>
@@ -131,15 +138,22 @@ async function patientView(quiet) {
 
 async function loadHistory() {
   const box = $('#history');
-  if (!box) return;
+  const id = S.patientId;
+  if (!box || !id) return;
+  const reqSeq = ++historyReqSeq;
   const f = S.filters;
   const q = new URLSearchParams({ days: f.days });
   if (f.status) q.set('status', f.status);
   if (f.medication_id) q.set('medication_id', f.medication_id);
   if (f.warning) q.set('warning', '1');
   let data;
-  try { data = await api.call(`/supervisor/patients/${encodeURIComponent(S.patientId)}/doses?${q}`); }
-  catch (e) { box.innerHTML = `<div class="section-title" style="margin-top:0"><h2>Riwayat dosis</h2></div><p class="err">${esc(e.message)}</p>`; return; }
+  try { data = await api.call(`/supervisor/patients/${encodeURIComponent(id)}/doses?${q}`); }
+  catch (e) {
+    if (reqSeq !== historyReqSeq || S.patientId !== id) return;
+    box.innerHTML = `<div class="section-title" style="margin-top:0"><h2>Riwayat dosis</h2></div><p class="err">${esc(e.message)}</p>`;
+    return;
+  }
+  if (reqSeq !== historyReqSeq || S.patientId !== id) return;
   const tz = data.patient.timezone;
   box.innerHTML = `<div class="section-title" style="margin-top:0"><h2>Riwayat dosis</h2><span class="small muted">${data.doses.length}${data.doses.length === 100 ? '+' : ''} dosis</span></div>
     <form id="filters" class="filters">
@@ -182,7 +196,16 @@ function openPatient(id) {
   window.scrollTo(0, 0);
 }
 
-document.addEventListener('click', (e) => {
+function confirmBox(title, text, okLabel, danger) {
+  return new Promise((resolve) => {
+    const el = openModal(`<div class="stack"><h2>${esc(title)}</h2><p class="muted">${esc(text)}</p>
+      <div class="grid2"><button class="btn" data-close>Batal</button><button class="btn ${danger ? 'danger' : 'primary'}" data-ok>${esc(okLabel)}</button></div></div>`,
+    { type: 'confirm', onClose: () => resolve(false) });
+    $('[data-ok]', el).addEventListener('click', () => { closeModal(true); resolve(true); });
+  });
+}
+
+document.addEventListener('click', async (e) => {
   const auth = e.target.closest('[data-auth]');
   if (auth) { S.authMode = auth.dataset.auth; return render(); }
   const open = e.target.closest('[data-open]');
@@ -191,6 +214,17 @@ document.addEventListener('click', (e) => {
   if (!act) return;
   if (act.dataset.act === 'back') { S.patientId = null; history.pushState({}, '', location.pathname); render(); }
   if (act.dataset.act === 'reload') render();
+  if (act.dataset.act === 'unlink-patient') {
+    const id = act.dataset.id, name = act.dataset.name;
+    if (!(await confirmBox(`Lepas ${name}?`, 'Kamu tidak akan lagi memantau jadwal dan riwayat pasien ini. Pasien bisa menautkanmu kembali nanti.', 'Lepas', true))) return;
+    try {
+      await api.call(`/supervisor/patients/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      S.patientId = null;
+      history.pushState({}, '', location.pathname);
+      render();
+      toast(`${name} dilepas dari daftar pantauan`);
+    } catch (err) { toast(err.message, true); }
+  }
 });
 document.addEventListener('change', (e) => {
   const f = e.target.form;
@@ -231,7 +265,7 @@ async function boot() {
   if (m) S.patientId = m[1];
   if (api.token) {
     try { S.user = (await api.call('/auth/me')).user; }
-    catch (e) { if (api.token) return errorView(e); }
+    catch (e) { if (api.token) { $('#logout').hidden = false; return errorView(e); } }
     if (S.user && S.user.role !== 'pengawas') { api.setToken(null); S.user = null; }
   }
   render();
